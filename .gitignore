@@ -1,5 +1,9 @@
 Packages
 .build
+Sources/main.swift
 xcuserdata
 *.xcodeproj
 Config/secrets
+.DS_Store
+.env
+Package.pins
