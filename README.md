@@ -1,15 +1,31 @@
-# Basic Template
+# Passwordless Authentication Provider for Vapor
 
-A basic vapor template for starting a new Vapor web application. If you're using vapor toolbox, you can use: `vapor new --template=basic`
+Adds Passwordless Authentication support to the Vapor web framework.
 
-## 📖 Documentation
+## Usage
 
-Visit the Vapor web framework's [documentation](http://docs.vapor.codes) for instructions on how to use this package.
+```swift
+import Vapor
+import Passwordless
 
-## 💧 Community
+let drop = Droplet()
+try drop.addProvider(Passwordless.Provider.self)
+```
 
-Join the welcoming community of fellow Vapor developers in [slack](http://vapor.team).
+## Config
 
-## 🔧 Compatibility
+To build, create a `passwordless.json` file in the `Config/secrets` folder.
+You may need to create the `secrets` folder if it does not exist. The secrets
+folder is under the gitignore and shouldn't be committed.
 
-This package has been tested on macOS and Ubuntu.
+Here's an example `Config/secrets/passwordless.json`
+
+```json
+{
+    "subject": "email",
+    "same-device": true,
+    "use-cookie": true,
+    "signer": "hmac256",
+    "key": passwordpasswordpasswordpassword
+}
+```
