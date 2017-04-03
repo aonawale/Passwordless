@@ -5,28 +5,29 @@ import Cookies
 
 public final class SignInMiddleware: Middleware {
     public init() {}
-    
+
     public func respond(to request: HTTP.Request, chainingTo next: Responder) throws -> Response {
-        let data = try Passwordless.verify(request: request)
-        
-        request.storage["email"] = data.sub
-        
+        let data = try Provider.verify(request: request)
+
+        request.storage[Provider.subject] = data.sub
+
         let response = try next.respond(to: request)
-        
+
         guard response.status != .notFound else {
-            let token = try Passwordless.tokenString(for: data.sub, expires: 60 * 5)
-            try Passwordless.cache.set(data.sub, token)
-            response.cookies.insert(Passwordless.issuer(age: 60 * 5))
-            response.headers.Authorization = token
+            let token = try Provider.tokenString(for: data.sub, expires: 60 * 5)
+            try Provider.cache.set(data.sub, token)
+            response.cookies.insert(Provider.issuer(age: 60 * 5))
+            response.headers["token"] = token
             throw Abort.notFound
         }
-        
-        let newToken = try Passwordless.tokenString(for: data.sub, expires: 60 * 5)
-        
-        try Passwordless.cache.set(data.sub, newToken)
-        
-        response.headers.Authorization = newToken
-        
+
+        // clean up
+        try Provider.cache.delete(data.sub)
+
+        // token
+        let newToken = try Provider.tokenString(for: data.sub, expires: 60 * 5)
+        response.headers["token"] = newToken
+
         return response
     }
 }
