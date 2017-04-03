@@ -26,6 +26,6 @@ Here's an example `Config/secrets/passwordless.json`
     "same-device": true,
     "use-cookie": true,
     "signer": "hmac256",
-    "key": passwordpasswordpasswordpassword
+    "key": "passwordpasswordpasswordpassword"
 }
 ```
