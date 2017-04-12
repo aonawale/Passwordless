@@ -2,31 +2,48 @@ import Vapor
 import HTTP
 import VaporJWT
 import Cookies
+import TurnstileCrypto
+import Foundation
 
 public final class SignInMiddleware: Middleware {
-    public init() {}
+    let identityKey: String
+
+    public init(identityKey: String = "id") {
+        self.identityKey = identityKey
+    }
 
     public func respond(to request: HTTP.Request, chainingTo next: Responder) throws -> Response {
-        let data = try Provider.verify(request: request)
+        let (_, subject, _) = try Provider.verify(request: request)
 
-        request.storage[Provider.subject] = data.sub
+        request.storage[Provider.subject] = subject
 
         let response = try next.respond(to: request)
 
-        guard response.status != .notFound else {
-            let token = try Provider.tokenString(for: data.sub, expires: 60 * 5)
-            try Provider.cache.set(data.sub, token)
-            response.cookies.insert(Provider.issuer(age: 60 * 5))
-            response.headers["token"] = token
-            throw Abort.notFound
+        guard 200..<300 ~= response.status.statusCode else {
+            let iss = TurnstileCrypto.URandom().secureToken
+            let issuer = Provider.issuer(age: 60 * 5, issuer: iss)
+            let token = try Provider.tempToken(for: subject, issuer: iss)
+            try Provider.cache.set(subject, token)
+            response.cookies.insert(issuer)
+            Provider.add(token: token, to: response)
+            return response
+        }
+
+        guard let id = response.json?[identityKey]?.string else {
+            throw Abort.custom(status: .internalServerError, message: "\(identityKey) not found in response payload")
         }
 
         // clean up
-        try Provider.cache.delete(data.sub)
+        try Provider.cache.delete(subject)
 
         // token
-        let newToken = try Provider.tokenString(for: data.sub, expires: 60 * 5)
-        response.headers["token"] = newToken
+        let payload = try Node(node: [
+            identityKey: Node(JWTIDClaim(id)),
+            "iat": Node(IssuedAtClaim(Seconds(Date().timeIntervalSince1970))),
+            "exp": Node(ExpirationTimeClaim(Date() + Provider.tokenExp))
+        ])
+        let newToken = try JWT(payload: payload, signer: Provider.signer)
+        Provider.add(token: try newToken.createToken(), to: response)
 
         return response
     }

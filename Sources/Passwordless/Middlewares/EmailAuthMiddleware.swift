@@ -11,13 +11,13 @@ public final class EmailAuthMiddleware: Middleware {
         guard let email = request.json?[Provider.subject]?.string else {
             throw Abort.custom(status: .badRequest, message: "`\(Provider.subject)` is required")
         }
-        let issuer = Provider.issuer(age: 60 * 5)
-        let token = try Provider.tokenString(for: email, issuer: issuer.value, expires: 60)
-        request.storage["token"] = token
+        let issuer = Provider.issuer(age: Provider.tempTokenExp)
+        let token = try Provider.tempToken(for: email, issuer: issuer.value)
+        request.storage[Provider.tokenKey] = token
 
         let response = try next.respond(to: request)
 
-        if response.status == .ok {
+        if 200..<300 ~= response.status.statusCode {
             try Provider.cache.set(email, token)
 
             if Provider.sameDevice {
