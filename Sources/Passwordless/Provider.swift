@@ -93,7 +93,8 @@ extension Provider {
 
         do {
             token = try JWT(token: accessToken.string)
-            guard try token.verifySignatureWith(Provider.signer) else {
+            let verified = try token.verifySignatureWith(Provider.signer)
+            guard verified else {
                 throw Abort.custom(status: .unauthorized, message: Status.unauthorized.reasonPhrase)
             }
         } catch {
