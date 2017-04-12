@@ -24,8 +24,11 @@ Here's an example `Config/secrets/passwordless.json`
 {
     "subject": "email",
     "same-device": true,
-    "use-cookie": true,
+    "token-medium": "body",
     "signer": "hmac256",
-    "key": "passwordpasswordpasswordpassword"
+    "key": "passwordpasswordpasswordpassword",
+    "token-expiration": 604800,
+    "temp-token-expiration": 900,
+    "token-key": "access_token"
 }
 ```
