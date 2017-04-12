@@ -17,9 +17,12 @@ public final class Provider: Vapor.Provider {
         case body
     }
 
-    static var subject: String = "email"
+    static var tokenKey: String = "access_token"
+    static var tempTokenExp: TimeInterval = 900.0 // fifteen minutes
+    static var tokenExp: TimeInterval = 0.0
+    static var subject = "email"
     static var medium: TokenMedium = .header
-    static var sameDevice: Bool = true
+    static var sameDevice = true
     static var cache: CacheProtocol!
     static var signer: HMACSigner!
 
@@ -46,57 +49,74 @@ public final class Provider: Vapor.Provider {
 }
 
 extension Provider {
-    static func token(for subject: String, issuer: String = TurnstileCrypto.URandom().secureToken, expires: Date) throws -> JWT {
+    static func add(token: String, to response: HTTP.Response) {
+        switch Provider.medium {
+        case .body:
+            response.json = response.json ?? JSON([:])
+            response.json?[Provider.tokenKey] = JSON(Node(token))
+        case .header:
+            response.headers[HeaderKey(Provider.tokenKey)] = token
+        case .cookie:
+            response.cookies.insert(Cookie(name: Provider.tokenKey, value: token))
+        }
+    }
+
+    static func extract(key: String, from token: JWT) -> String? {
+        return token.payload[key]?.node.object?[key]?.string
+    }
+
+    static func tempToken(for subject: String, issuer: String = TurnstileCrypto.URandom().secureToken) throws -> String {
         let payload = try Node(node: [
-            "iss": issuer,
-            "sub": subject,
-            "exp": Node(ExpirationTimeClaim(expires))
+            "iss": Node(IssuerClaim(issuer)),
+            "sub": Node(SubjectClaim(subject)),
+            "exp": Node(ExpirationTimeClaim(Date() + Provider.tempTokenExp))
         ])
-        return try JWT(payload: payload, signer: Provider.signer)
+        return try JWT(payload: payload, signer: Provider.signer).createToken()
     }
 
-    static func tokenString(for subject: String, issuer: String = TurnstileCrypto.URandom().secureToken, expires: Date) throws -> String {
-        return try Provider.token(for: subject, issuer: issuer, expires: expires).createToken()
-    }
-
-    static func tokenString(for subject: String, issuer: String = TurnstileCrypto.URandom().secureToken, expires: TimeInterval) throws -> String {
-        return try Provider.token(for: subject, issuer: issuer, expires: Date() + expires).createToken()
-    }
-
-    static func issuer(age: TimeInterval) -> Cookie {
-        let issuer = TurnstileCrypto.URandom().secureToken
+    static func issuer(age: TimeInterval, issuer: String = TurnstileCrypto.URandom().secureToken) -> Cookie {
         return Cookie(name: "iss", value: issuer, expires: Date() + age, maxAge: Int(age), secure: true)
     }
 
     @discardableResult static func verify(request: Request) throws -> TokenPayload {
-        guard let accessToken = request.auth.header?.bearer else {
-            throw Abort.custom(status: .badRequest, message: "Authorization token is required.")
+        var accessToken: AccessToken!
+
+        if let token = request.data[Provider.tokenKey]?.string {
+            accessToken = AccessToken(string: token)
+        } else if let bearer = request.auth.header?.bearer {
+            accessToken = bearer
+        } else {
+            throw Abort.custom(status: .badRequest, message: "\(Provider.tokenKey) is required.")
         }
 
-        guard let token = try? JWT(token: accessToken.string),
-            let _ = try? token.verifySignatureWith(signer),
-            let subject = token.payload["sub"]?.string else {
-                throw Abort.custom(status: .unauthorized, message: "Invalid Authorization token. The token cannot be verified.")
+        var token: JWT!
+
+        do {
+            token = try JWT(token: accessToken.string)
+            guard try token.verifySignatureWith(Provider.signer) else {
+                throw Abort.custom(status: .unauthorized, message: Status.unauthorized.reasonPhrase)
+            }
+        } catch {
+            throw Abort.custom(status: .unauthorized, message: Status.unauthorized.reasonPhrase)
+        }
+
+        guard let subject = Provider.extract(key: "sub", from: token),
+            let issuer = Provider.extract(key: "iss", from: token) else {
+            throw Abort.custom(status: .unauthorized, message: Status.unauthorized.reasonPhrase)
         }
 
         guard let cachedTokenString = try cache.get(subject)?.string,
-            let cachedToken = try? JWT(token: cachedTokenString) else {
-                throw Abort.custom(status: .unauthorized, message: "Token has expired, or has already been used.")
-        }
-
-        guard cachedTokenString == accessToken.string,
-            let _subject = cachedToken.payload["sub"]?.string,
-            let issuer = token.payload["iss"]?.string else {
-                throw Abort.custom(status: .unauthorized, message: "The token was not of the correct type, or has already been used.")
+            cachedTokenString == accessToken.string else {
+            throw Abort.custom(status: .unauthorized, message: "Token has expired, or has already been used.")
         }
 
         if Provider.sameDevice {
             guard request.cookies.contains(where: { $0.value == issuer }) else {
-                throw Abort.custom(status: .unauthorized, message: "You must continue authentication on the same device")
+                throw Abort.custom(status: .unauthorized, message: "You must continue using the same device.")
             }
         }
 
-        return (cachedToken, _subject, issuer)
+        return (token, subject, issuer)
     }
 }
 
@@ -118,16 +138,25 @@ extension Provider {
             throw Error.config("No `key` found in `passwordless.json` config.")
         }
 
-        Provider.sameDevice = passwordless["same-device"]?.bool ?? false
-        Provider.subject = passwordless["same-device"]?.string ?? "email"
-
-        let mediumString = passwordless["token-medium"]?.string ?? "header"
-
-        guard let medium = TokenMedium(rawValue: mediumString) else {
-            throw Error.config("Unsupported token medium `\(mediumString)` specified")
+        guard let expiration = passwordless["token-expiration"]?.double else {
+            throw Error.config("No `token-expiration` found in `passwordless.json` config.")
         }
 
-        Provider.medium = medium
+        Provider.tokenExp = expiration
+        Provider.tokenKey = passwordless["token-key"]?.string ?? "access_token"
+        Provider.sameDevice = passwordless["same-device"]?.bool ?? true
+        Provider.subject = passwordless["subject"]?.string ?? "email"
+
+        if let mediumString = passwordless["token-medium"]?.string {
+            guard let medium = TokenMedium(rawValue: mediumString) else {
+                throw Error.config("Unsupported token medium `\(mediumString)` specified")
+            }
+            Provider.medium = medium
+        }
+
+        if let expiration = passwordless["temp-token-expiration"]?.double {
+            Provider.tempTokenExp = expiration
+        }
 
         switch signerString {
         case "hmac256":
@@ -140,6 +169,31 @@ extension Provider {
             throw Error.config("Unsupported signer '\(signerString)' specified.")
         }
 
+    }
+}
+
+extension AuthError: AbortError {
+    public var metadata: Node? {
+        return nil
+    }
+
+    public var status: Status {
+        return .unauthorized
+    }
+
+    public var code: Int {
+        return status.statusCode
+    }
+
+    public var message: String {
+        switch self {
+        case .invalidBearerAuthorization:
+            return "Invalid Bearer Authorization"
+        case .noAuthorizationHeader:
+            return "No Authorization Header"
+        default:
+            return status.reasonPhrase
+        }
     }
 }
 
