@@ -20,11 +20,11 @@ public final class SignUpMiddleware: Middleware {
 
         let response = try next.respond(to: request)
 
-        guard let id = response.json?[identityKey]?.string else {
-            throw Abort.custom(status: .internalServerError, message: "\(identityKey) not found in response payload")
-        }
-
         if response.status == .created {
+            guard let id = response.json?[identityKey]?.string else {
+                throw Abort.custom(status: .internalServerError, message: "\(identityKey) not found in response payload")
+            }
+
             // token
             let payload = try Node(node: [
                 identityKey: Node(JWTIDClaim(id)),
