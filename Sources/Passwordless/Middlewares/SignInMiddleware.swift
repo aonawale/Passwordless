@@ -21,7 +21,7 @@ public final class SignInMiddleware: Middleware {
 
         guard 200..<300 ~= response.status.statusCode else {
             let iss = TurnstileCrypto.URandom().secureToken
-            let issuer = Provider.issuer(age: 60 * 5, issuer: iss)
+            let issuer = Provider.issuer(age: Provider.tempTokenExp, issuer: iss)
             let token = try Provider.tempToken(for: subject, issuer: iss)
             try Provider.cache.set(subject, token)
             response.cookies.insert(issuer)
