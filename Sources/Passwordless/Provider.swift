@@ -1,11 +1,11 @@
 import Vapor
 import HTTP
-import VaporJWT
+import JWT
 import Foundation
-import TurnstileCrypto
 import Cache
 import Cookies
-import Auth
+import AuthProvider
+import TurnstileCrypto
 
 public final class Provider: Vapor.Provider {
 
@@ -21,21 +21,29 @@ public final class Provider: Vapor.Provider {
     static var tempTokenExp: TimeInterval = 900.0 // fifteen minutes
     static var tokenExp: TimeInterval = 0.0
     static var subject = "email"
-    static var medium: TokenMedium = .header
+    static var medium: TokenMedium = .body
     static var sameDevice = true
     static var cache: CacheProtocol!
     static var signer: HMACSigner!
+
+    public static var repositoryName: String {
+        return ""
+    }
 
     public convenience init(config: Config) throws {
         _ = try Provider.configure(config: config)
         self.init()
     }
 
-    public func boot(_ drop: Droplet) {
-        Provider.cache = drop.cache
+    public func boot(_ config: Config) throws {
+
     }
 
-    public func beforeRun(_: Droplet) {
+    public func boot(_ droplet: Droplet) throws {
+        Provider.cache = droplet.cache
+    }
+
+    public func beforeRun(_ droplet: Droplet) throws {
 
     }
 
@@ -46,14 +54,23 @@ public final class Provider: Vapor.Provider {
     public func beforeServe(_ drop: Droplet) {
 
     }
+
+    public static func verifySignature(token: JWT) throws {
+        do {
+            try token.verifySignature(using: Passwordless.Provider.signer)
+        } catch {
+            throw AuthenticationError.invalidCredentials
+        }
+    }
 }
 
 extension Provider {
-    static func add(token: String, to response: HTTP.Response) {
+    static func add(token: String, subject: String, to response: HTTP.Response) throws {
+        response.json = response.json ?? JSON()
+        try response.json?.set(Provider.subject, subject)
         switch Provider.medium {
         case .body:
-            response.json = response.json ?? JSON([:])
-            response.json?[Provider.tokenKey] = JSON(Node(token))
+            try response.json?.set(Provider.tokenKey, token)
         case .header:
             response.headers[HeaderKey(Provider.tokenKey)] = token
         case .cookie:
@@ -62,58 +79,63 @@ extension Provider {
     }
 
     static func extract(key: String, from token: JWT) -> String? {
-        return token.payload[key]?.node.object?[key]?.string
+        return token.payload[key]?.string
     }
 
     static func tempToken(for subject: String, issuer: String = TurnstileCrypto.URandom().secureToken) throws -> String {
-        let payload = try Node(node: [
-            "iss": Node(IssuerClaim(issuer)),
-            "sub": Node(SubjectClaim(subject)),
-            "exp": Node(ExpirationTimeClaim(Date() + Provider.tempTokenExp))
-        ])
-        return try JWT(payload: payload, signer: Provider.signer).createToken()
+        var json = JSON()
+        try json.set("iss", IssuerClaim(string: issuer).value)
+        try json.set("sub", SubjectClaim(string: subject).value)
+        try json.set("exp", ExpirationTimeClaim(createTimestamp: {
+            Seconds((Date() + Provider.tempTokenExp).timeIntervalSince1970)
+        }).value)
+
+        return try JWT(payload: json, signer: Provider.signer).createToken()
     }
 
     static func issuer(age: TimeInterval, issuer: String = TurnstileCrypto.URandom().secureToken) -> Cookie {
-        return Cookie(name: "iss", value: issuer, expires: Date() + age, maxAge: Int(age), secure: true)
+        return Cookie(name: "iss", value: issuer, expires: Date() + age)
     }
 
-    @discardableResult static func verify(request: Request) throws -> TokenPayload {
-        var accessToken: AccessToken!
+    @discardableResult static func verifyToken(request: Request) throws -> (Token, JWT) {
+        var accessToken: Token!
 
         if let token = request.data[Provider.tokenKey]?.string {
-            accessToken = AccessToken(string: token)
+            accessToken = Token(string: token)
         } else if let bearer = request.auth.header?.bearer {
             accessToken = bearer
         } else {
-            throw Abort.custom(status: .badRequest, message: "\(Provider.tokenKey) is required.")
+            throw Abort(.badRequest, reason: "\(Provider.tokenKey) is required.")
         }
 
-        var token: JWT!
+        var jwt: JWT!
 
         do {
-            token = try JWT(token: accessToken.string)
-            let verified = try token.verifySignatureWith(Provider.signer)
-            guard verified else {
-                throw Abort.custom(status: .unauthorized, message: Status.unauthorized.reasonPhrase)
-            }
+            jwt = try JWT(token: accessToken.string)
+            try jwt.verifySignature(using: Provider.signer)
         } catch {
-            throw Abort.custom(status: .unauthorized, message: Status.unauthorized.reasonPhrase)
+            throw Abort(.unauthorized, reason: Status.unauthorized.reasonPhrase)
         }
+
+        return (accessToken, jwt)
+    }
+
+    @discardableResult static func verify(request: Request) throws -> TokenPayload {
+        let (accessToken, token) = try verifyToken(request: request)
 
         guard let subject = Provider.extract(key: "sub", from: token),
             let issuer = Provider.extract(key: "iss", from: token) else {
-            throw Abort.custom(status: .unauthorized, message: Status.unauthorized.reasonPhrase)
+            throw Abort(.unauthorized, reason: Status.unauthorized.reasonPhrase)
         }
 
         guard let cachedTokenString = try cache.get(subject)?.string,
             cachedTokenString == accessToken.string else {
-            throw Abort.custom(status: .unauthorized, message: "Token has expired, or has already been used.")
+            throw Abort(.unauthorized, reason: "Token has expired, or has already been used.")
         }
 
         if Provider.sameDevice {
             guard request.cookies.contains(where: { $0.value == issuer }) else {
-                throw Abort.custom(status: .unauthorized, message: "You must continue using the same device.")
+                throw Abort(.unauthorized, reason: "You must continue using the same device.")
             }
         }
 
@@ -128,19 +150,19 @@ extension Provider {
 
     public static func configure(config: Config) throws {
         guard let passwordless = config["passwordless"]?.object else {
-            throw Error.config("No `passwordless.json` config file or jwt object")
+            throw Error.config("No `passwordless.json` config file found")
         }
 
         guard let signerString = passwordless["signer"]?.string else {
-            throw Error.config("No `signer` found in `passwordless.json` config.")
+            throw Error.config("No `signer` specified in `passwordless.json` config.")
         }
 
         guard let key = passwordless["key"]?.string else {
-            throw Error.config("No `key` found in `passwordless.json` config.")
+            throw Error.config("No `key` specified in `passwordless.json` config.")
         }
 
         guard let expiration = passwordless["token-expiration"]?.double else {
-            throw Error.config("No `token-expiration` found in `passwordless.json` config.")
+            throw Error.config("No `token-expiration` specified in `passwordless.json` config.")
         }
 
         Provider.tokenExp = expiration
@@ -161,11 +183,11 @@ extension Provider {
 
         switch signerString {
         case "hmac256":
-            Provider.signer = HS256(key: key)
+            Provider.signer = HS256(key: key.makeBytes())
         case "hmac384":
-            Provider.signer = HS384(key: key)
+            Provider.signer = HS384(key: key.makeBytes())
         case "hmac512":
-            Provider.signer = HS512(key: key)
+            Provider.signer = HS512(key: key.makeBytes())
         default:
             throw Error.config("Unsupported signer '\(signerString)' specified.")
         }
@@ -173,7 +195,7 @@ extension Provider {
     }
 }
 
-extension AuthError: AbortError {
+extension AuthorizationError {
     public var metadata: Node? {
         return nil
     }
@@ -188,18 +210,12 @@ extension AuthError: AbortError {
 
     public var message: String {
         switch self {
-        case .invalidBearerAuthorization:
+        case .notAuthorized:
             return "Invalid Bearer Authorization"
-        case .noAuthorizationHeader:
+        case .unknownPermission:
             return "No Authorization Header"
         default:
             return status.reasonPhrase
         }
-    }
-}
-
-extension Authorization {
-    init(request: Request) {
-        self.init(header: request.headers["Authorization"] ?? "")
     }
 }

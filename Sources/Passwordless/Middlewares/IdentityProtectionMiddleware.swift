@@ -1,37 +1,36 @@
 import Vapor
 import HTTP
-import VaporJWT
+import JWT
 import Cookies
-import Auth
+import AuthProvider
 
-public final class IdentityProtectionMiddleware: Middleware {
+public final class IdentityProtectionMiddleware<T: Parameterizable>: Middleware {
     let param: String
     let identityKey: String
 
-    // w0 id used internally by Vapor when you call .get, .post, etc on builder
-    public init(param: String = "w0", identityKey: String = "id") {
+    public init(param: String = T.uniqueSlug, identityKey: String = "sub") {
         self.param = param
         self.identityKey = identityKey
     }
 
     public func respond(to request: HTTP.Request, chainingTo next: Responder) throws -> Response {
         guard let bearer = request.auth.header?.bearer else {
-            throw AuthError.noAuthorizationHeader
+            throw AuthenticationError.noAuthorizationHeader
         }
 
         guard let token = try? JWT(token: bearer.string),
             let id = token.payload[identityKey]?.string else {
-            throw AuthError.invalidBearerAuthorization
+            throw AuthenticationError.invalidBearerAuthorization
         }
 
         do {
-            _ = try token.verifySignatureWith(Provider.signer)
+            _ = try token.verifySignature(using: Provider.signer)
         } catch {
-            throw Abort.custom(status: .unauthorized, message: Status.unauthorized.reasonPhrase)
+            throw Abort(.unauthorized, reason: Status.unauthorized.reasonPhrase)
         }
 
         guard id == request.parameters[param]?.string else {
-            throw Abort.custom(status: .unauthorized, message: Status.unauthorized.reasonPhrase)
+            throw Abort(.unauthorized, reason: Status.unauthorized.reasonPhrase)
         }
 
         return try next.respond(to: request)

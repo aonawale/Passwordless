@@ -1,25 +1,25 @@
 import Vapor
 import HTTP
-import VaporJWT
 import Cookies
-import Auth
+import AuthProvider
+import JWT
 
 public final class AuthorizationMiddleware: Middleware {
     public init() {}
 
     public func respond(to request: HTTP.Request, chainingTo next: Responder) throws -> Response {
         guard let accessToken = request.auth.header?.bearer else {
-            throw AuthError.noAuthorizationHeader
+            throw AuthenticationError.noAuthorizationHeader
         }
 
         guard let token = try? JWT(token: accessToken.string) else {
-            throw AuthError.invalidBearerAuthorization
+            throw AuthenticationError.invalidBearerAuthorization
         }
 
         do {
-            _ = try token.verifySignatureWith(Provider.signer)
+            try token.verifySignature(using: Provider.signer)
         } catch {
-            throw Abort.custom(status: .unauthorized, message: Status.unauthorized.reasonPhrase)
+            throw Abort(.unauthorized, reason: Status.unauthorized.reasonPhrase)
         }
 
         return try next.respond(to: request)

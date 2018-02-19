@@ -1,15 +1,13 @@
 import Vapor
 import HTTP
-import VaporJWT
 import Cookies
-import Auth
 
 public final class EmailAuthMiddleware: Middleware {
     public init() {}
 
     public func respond(to request: HTTP.Request, chainingTo next: Responder) throws -> Response {
         guard let email = request.json?[Provider.subject]?.string else {
-            throw Abort.custom(status: .badRequest, message: "`\(Provider.subject)` is required")
+            throw Abort(.badRequest, reason: "`\(Provider.subject)` is required")
         }
         let issuer = Provider.issuer(age: Provider.tempTokenExp)
         let token = try Provider.tempToken(for: email, issuer: issuer.value)
