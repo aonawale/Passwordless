@@ -1,8 +1,9 @@
 import Vapor
 import HTTP
-import VaporJWT
+import JWT
 import Cookies
 import TurnstileCrypto
+import Crypto
 import Foundation
 
 public final class SignInMiddleware: Middleware {
@@ -25,25 +26,27 @@ public final class SignInMiddleware: Middleware {
             let token = try Provider.tempToken(for: subject, issuer: iss)
             try Provider.cache.set(subject, token)
             response.cookies.insert(issuer)
-            Provider.add(token: token, to: response)
+            try Provider.add(token: token, subject: subject, to: response)
             return response
         }
 
         guard let id = response.json?[identityKey]?.string else {
-            throw Abort.custom(status: .internalServerError, message: "\(identityKey) not found in response payload")
+            throw Abort(.internalServerError, reason: "\(identityKey) not found in response payload")
         }
 
         // clean up
         try Provider.cache.delete(subject)
 
         // token
-        let payload = try Node(node: [
-            identityKey: Node(JWTIDClaim(id)),
-            "iat": Node(IssuedAtClaim(Seconds(Date().timeIntervalSince1970))),
-            "exp": Node(ExpirationTimeClaim(Date() + Provider.tokenExp))
-        ])
-        let newToken = try JWT(payload: payload, signer: Provider.signer)
-        Provider.add(token: try newToken.createToken(), to: response)
+        var json = JSON()
+        try json.set("sub", JWTIDClaim(string: id).value)
+        try json.set("iat", IssuedAtClaim(seconds: Seconds(Date().timeIntervalSince1970)).value)
+        try json.set("exp", ExpirationTimeClaim.init(createTimestamp: {
+            Seconds((Date() + Provider.tokenExp).timeIntervalSince1970)
+        }).value)
+
+        let newToken = try JWT(payload: json, signer: Provider.signer)
+        try Provider.add(token: try newToken.createToken(), subject: subject, to: response)
 
         return response
     }

@@ -1,8 +1,8 @@
 import Vapor
 import HTTP
-import VaporJWT
 import Cookies
 import Foundation
+import JWT
 
 public final class SignUpMiddleware: Middleware {
     let identityKey: String
@@ -14,25 +14,31 @@ public final class SignUpMiddleware: Middleware {
     public func respond(to request: HTTP.Request, chainingTo next: Responder) throws -> Response {
         let data = try Provider.verify(request: request)
 
-        guard let reqEmail = request.json?[Provider.subject]?.string, reqEmail == data.sub else {
-            throw Abort.custom(status: .unauthorized, message: "Unauthorized '\(Provider.subject)'")
+
+        guard let reqJSON = request.json,
+            let reqEmail: String = try? reqJSON.get(Provider.subject),
+            reqEmail == data.sub else {
+            throw Abort(.unauthorized, reason: "Unauthorized '\(Provider.subject)'")
         }
 
         let response = try next.respond(to: request)
 
         if response.status == .created {
-            guard let id = response.json?[identityKey]?.string else {
-                throw Abort.custom(status: .internalServerError, message: "\(identityKey) not found in response payload")
+            guard let resJSON = response.json,
+                let id = resJSON[identityKey]?.string else {
+                throw Abort(.internalServerError, reason: "\(identityKey) not found in response payload")
             }
 
             // token
-            let payload = try Node(node: [
-                identityKey: Node(JWTIDClaim(id)),
-                "iat": Node(IssuedAtClaim(Seconds(Date().timeIntervalSince1970))),
-                "exp": Node(ExpirationTimeClaim(Date() + Provider.tokenExp))
-            ])
-            let newToken = try JWT(payload: payload, signer: Provider.signer)
-            Provider.add(token: try newToken.createToken(), to: response)
+            var json = JSON()
+            try json.set("sub", JWTIDClaim(string: id).value)
+            try json.set("iat", IssuedAtClaim(seconds: Seconds(Date().timeIntervalSince1970)).value)
+            try json.set("exp", ExpirationTimeClaim.init(createTimestamp: {
+                Seconds((Date() + Provider.tokenExp).timeIntervalSince1970)
+            }).value)
+
+            let newToken = try JWT(payload: json, signer: Provider.signer)
+            try Provider.add(token: try newToken.createToken(), subject: data.sub, to: response)
 
             // clean up
             try Provider.cache.delete(data.sub)
